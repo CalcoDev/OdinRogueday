@@ -6,3 +6,5 @@
 tetroid.lib
 
 .vscode
+
+*.dll
