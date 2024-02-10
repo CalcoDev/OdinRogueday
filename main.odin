@@ -3,21 +3,12 @@ package main
 import "core:c/libc"
 import "core:fmt"
 import linalg "core:math/linalg"
+import rand "core:math/rand"
 import "core:os"
+import slice "core:slice"
 import SDL "vendor:sdl2"
 import stb_image "vendor:stb/image"
 
-// vec2f :: union {
-// 	[2]f32,
-// 	struct {x, y: f32}
-// }
-// vec2i :: union {
-// 	[2]i32,
-// 	struct {x, y: i32}
-// }
-
-// vec2f :: struct {x, y: f32}
-// vec2i :: struct {x, y: i32}
 draw_texture :: proc(
 	renderer: ^SDL.Renderer,
 	texture: ^SDL.Texture,
@@ -126,8 +117,27 @@ get_text_rect :: proc(s: string, scale: f32, pos: vec2f) -> recti {
 vec2f :: [2]f32
 vec2i :: [2]i32
 
+Vec2i_Dirs := [4]vec2i{{0, 1}, {1, 0}, {-1, 0}, {0, -1}}
+
 rectf :: [4]f32
 recti :: [4]i32
+
+rectf_from_relative :: proc(pos: vec2f, rect: rectf) -> rectf {
+	return {rect.x + pos.x, rect.y + pos.y, rect.z, rect.w}
+}
+
+// RETURNS -1 -1 -1 -1 if there is no overlap
+rectf_get_overlap :: proc(a: rectf, b: rectf) -> rectf {
+	x := max(a.x, b.x)
+	y := max(a.y, b.y)
+	w := min(a.x + a.z, b.x + b.z) - x
+	h := min(a.y + a.w, b.y + b.w) - y
+
+	if w < 0 || h < 0 {
+		return {-1, -1, -1, -1}
+	}
+	return {x, y, w, h}
+}
 
 Sprite :: struct {
 	pos:  vec2i,
@@ -153,6 +163,11 @@ Entity :: struct {
 	position:       vec2f,
 	scale:          f32,
 
+	// collisions
+	coll_aabb:      rectf,
+	coll_layer:     Layers,
+	coll_mask:      Layers,
+	coll_static:    bool,
 
 	// sprite comp
 	sprite:         Sprite,
@@ -172,10 +187,11 @@ Component :: enum {
 	None = 0,
 	IsCamera,
 	Sprite,
+	Collider,
 	UI_Text,
 	UI_Button, // DOES NOT RENDER UI_TEXT, INSTEAD IT RENDERS A SPRITE
 }
-Components :: bit_set[Component]
+Components :: distinct bit_set[Component]
 
 EntityType :: enum {
 	None = 0,
@@ -185,6 +201,13 @@ EntityType :: enum {
 	Skeleton,
 	Zombie,
 }
+
+Layer :: enum {
+	Default,
+	Player,
+	Tilemap,
+}
+Layers :: distinct bit_set[Layer]
 
 entity_make_text :: proc(
 	pos: vec2f,
@@ -235,6 +258,13 @@ entity_make_button :: proc(
 	return entity
 }
 
+entity_actor_move :: proc(entity: ^Entity, scene: ^Scene, movement: vec2f) {
+	entity.position.x += movement.x
+	entity_no_collisions(entity, scene, true)
+	entity.position.y += movement.y
+	entity_no_collisions(entity, scene, false)
+}
+
 entity_update :: proc(entity: ^Entity, scene: ^Scene) {
 	// TODO(calco): MAKE THIS NOT STATIC LMAO
 	@(static)
@@ -242,21 +272,28 @@ entity_update :: proc(entity: ^Entity, scene: ^Scene) {
 
 	// TODO(calco): Stuff
 	if (entity.type == .Player) {
-		using scene.state
 		move := vec2f {
-			f32(i32(keys[SDL.Keycode.D] == .Down) - i32(keys[SDL.Keycode.A] == .Down)),
-			f32(i32(keys[SDL.Keycode.S] == .Down) - i32(keys[SDL.Keycode.W] == .Down)),
+			f32(
+				i32(scene.state.keys[SDL.Keycode.D] == .Down) -
+				i32(scene.state.keys[SDL.Keycode.A] == .Down),
+			),
+			f32(
+				i32(scene.state.keys[SDL.Keycode.S] == .Down) -
+				i32(scene.state.keys[SDL.Keycode.W] == .Down),
+			),
 		}
-		move = linalg.vector_normalize0(move)
-		entity.position += move * 100 * dt
+		move = linalg.vector_normalize0(move) * 100 * scene.state.dt
+		entity_actor_move(entity, scene, move)
+		// entity.position += move
+
+		// TODO(calco): DEBUG TAKE THIS OUT
+		if scene.state.mouse.buttons[1] == .Pressed {
+			generate_map(&scene.tilemap)
+		}
 	} else if (entity.type == .Camera) {
 		if (entity.scale != prev_cam_zoom) {
 			SDL.RenderSetScale(scene.state.renderer, entity.scale, entity.scale)
 			prev_cam_zoom = entity.scale
-		}
-
-		if (scene.player != nil) {
-			entity.position = scene.player.position
 		}
 	}
 
@@ -272,6 +309,69 @@ entity_update :: proc(entity: ^Entity, scene: ^Scene) {
 			} else if (scene.state.mouse.buttons[1] == .Released && entity.ui_btn_down) {
 				entity.ui_btn_down = false
 			}
+		}
+	}
+}
+
+entity_no_collisions :: proc(entity: ^Entity, scene: ^Scene, resolve_h: bool) {
+	if (entity.components & Components{.Collider} != {}) {
+		// TILEMAP collisions
+		if (entity.coll_mask & Layers{.Tilemap} != {}) {
+			// TODO(calco): tilemap collision
+		}
+
+		// TODO(Calco)): stop looping, have some hash thing
+		for e2 in &scene.entities {
+			e2 := &e2
+			if (e2 == entity || e2.components & Components{.Collider} == {}) {
+				continue
+			}
+			if (entity.coll_mask & e2.coll_layer == {}) {
+				continue
+			}
+
+			e1_rect := rectf_from_relative(entity.position, entity.coll_aabb)
+			e2_rect := rectf_from_relative(e2.position, e2.coll_aabb)
+
+			// Check if entities are overlapping
+			overlap := rectf_get_overlap(e1_rect, e2_rect)
+			if overlap.x <= 0 {
+				continue
+			}
+
+			// WE ARE COLLIDING
+			movement := vec2f{overlap.z, overlap.w} * 1.02
+			if (resolve_h) {
+				movement.y = 0
+			} else {
+				movement.x = 0
+			}
+
+			if (entity.position.x < e2.position.x) {
+				movement.x *= -1
+			}
+			if (entity.position.y < e2.position.y) {
+				movement.y *= -1
+			}
+
+			if (!entity.coll_static && !e2.coll_static) {
+				movement *= 0.5
+				entity.position += movement
+				e2.position -= movement
+			} else if (e2.coll_static) {
+				entity.position += movement
+			} else {
+				e2.position -= movement
+			}
+		}
+
+	}
+}
+
+entity_late_update :: proc(entity: ^Entity, scene: ^Scene) {
+	if entity.type == .Camera {
+		if (scene.player != nil) {
+			entity.position = scene.player.position
 		}
 	}
 }
@@ -317,6 +417,7 @@ Tilemap :: struct {
 	height:    i32,
 	tile_size: vec2i,
 	cells:     [dynamic]Tile,
+	position:  vec2f,
 }
 
 Tile :: enum {
@@ -331,7 +432,11 @@ Tile_Sprites := [Tile]vec2i {
 	.Floor = {16, 64},
 }
 
-tilemap_create_size :: proc(size: vec2i, tile_size: vec2i) -> Tilemap {
+tilemap_in_bounds :: proc(tilemap: ^Tilemap, pos: vec2i) -> bool {
+	return pos.x >= 0 && pos.y >= 0 && pos.x < tilemap.width && pos.y < tilemap.height
+}
+
+tilemap_create_size :: proc(size: vec2i, tile_size: vec2i, pos: vec2f) -> Tilemap {
 	s := size.x * size.y
 	return(
 		Tilemap {
@@ -339,6 +444,7 @@ tilemap_create_size :: proc(size: vec2i, tile_size: vec2i) -> Tilemap {
 			height = size.y,
 			tile_size = tile_size,
 			cells = make([dynamic]Tile, s, s),
+			position = pos,
 		} \
 	)
 }
@@ -363,13 +469,12 @@ tilemap_render :: proc(tilemap: ^Tilemap, scene: ^Scene) {
 	screen_half_size_tiles := ((w / 2) / tilemap.tile_size) + vec2i{3, 3}
 	cam_pos_tiles := cam_pos / tilemap.tile_size
 
-	top_left := cam_pos_tiles - screen_half_size_tiles
-	bottom_right := cam_pos_tiles + screen_half_size_tiles
+	map_pos_tiles := vec2i{i32(tilemap.position.x / 16), i32(tilemap.position.y / 16)}
+	top_left := cam_pos_tiles - screen_half_size_tiles - map_pos_tiles
+	bottom_right := cam_pos_tiles + screen_half_size_tiles - map_pos_tiles
 
 	top_left = linalg.clamp(top_left, vec2i{0, 0}, vec2i{tilemap.width, tilemap.height})
 	bottom_right = linalg.clamp(bottom_right, vec2i{0, 0}, vec2i{tilemap.width, tilemap.height})
-
-	// fmt.println("TL: ", top_left, " | BR: ", bottom_right)
 
 	// SHOULD OFFSET BY THE TILEMAP POSITION BUT LMAO
 	for y := top_left.y; y < bottom_right.y; y += 1 {
@@ -378,6 +483,7 @@ tilemap_render :: proc(tilemap: ^Tilemap, scene: ^Scene) {
 			draw_sprite(
 				scene.state,
 				Sprite{Tile_Sprites[tilemap.cells[idx]], tilemap.tile_size},
+				tilemap.position +
 				vec2f{f32(x * tilemap.tile_size.x), f32(y * tilemap.tile_size.y)},
 				false,
 			)
@@ -428,10 +534,12 @@ scene_empty :: proc(state: ^State) -> Scene {
 	return scene
 }
 
-scene_add_tilemap :: proc(scene: ^Scene, size: vec2i, tile_size: vec2i) {
+scene_add_tilemap :: proc(scene: ^Scene, size: vec2i, tile_size: vec2i, pos: vec2f) -> ^Tilemap {
 	scene.tilemap_enabled = true
-	scene.tilemap = tilemap_create_size(size, tile_size)
-	tilemap_fill(&scene.tilemap, Tile.Floor)
+	scene.tilemap = tilemap_create_size(size, tile_size, pos)
+	tilemap_fill(&scene.tilemap, Tile.Wall)
+
+	return &scene.tilemap
 }
 
 scene_free :: proc(scene: ^Scene) {
@@ -457,6 +565,12 @@ scene_spawn_entity :: proc(scene: ^Scene, entity: Entity) -> ^Entity {
 scene_update :: proc(scene: ^Scene) {
 	for entity in &scene.entities {
 		entity_update(&entity, scene)
+	}
+}
+
+scene_late_update :: proc(scene: ^Scene) {
+	for entity in &scene.entities {
+		entity_late_update(&entity, scene)
 	}
 }
 
@@ -545,9 +659,90 @@ state_make_menu_scene :: proc(state: ^State) -> Scene {
 	return scene
 }
 
+// MAP GENERATION
+generate_map_ca :: proc(tilemap: ^Tilemap) {
+	step_count :: 5
+	random := rand.create(rand._system_random())
+	for y in 0 ..< tilemap.height {
+		for x in 0 ..< tilemap.width {
+			idx := tilemap_v2_to_idx(tilemap, {x, y})
+			tilemap.cells[idx] = .Floor if rand.float32(&random) < 0.65 else .Wall
+		}
+	}
+	new_cells := make([dynamic]Tile, tilemap.width * tilemap.height)
+	for _ in 0 ..< step_count {
+		for y in 0 ..< tilemap.height {
+			for x in 0 ..< tilemap.width {
+				idx := tilemap_v2_to_idx(tilemap, {x, y})
+				tile := tilemap.cells[idx]
+				neighbours := 0
+				for yoff in -1 ..< 2 {
+					for xoff in -1 ..< 2 {
+						npos := vec2i{x + i32(xoff), y + i32(yoff)}
+						if npos.x >= 0 &&
+						   npos.x < tilemap.width &&
+						   npos.y >= 0 &&
+						   npos.y < tilemap.height {
+							neighbours += int(
+								tilemap.cells[tilemap_v2_to_idx(tilemap, npos)] == .Wall,
+							)
+						}
+					}
+				}
+
+				if (tile == .Wall && neighbours >= 4) || (tile != .Wall && neighbours >= 5) {
+					new_cells[idx] = .Wall
+				} else {
+					new_cells[idx] = .Floor
+				}
+			}
+		}
+
+		for y in 0 ..< tilemap.height {
+			for x in 0 ..< tilemap.width {
+				idx := tilemap_v2_to_idx(tilemap, {x, y})
+				tilemap.cells[idx] = new_cells[idx]
+			}
+		}
+	}
+	delete(new_cells)
+}
+
+generate_map_walker :: proc(tilemap: ^Tilemap, pos: vec2i, step_count: i32) {
+	pos := pos
+	step_count := step_count
+
+	for {
+		if !tilemap_in_bounds(tilemap, pos) || step_count == 0 {
+			return
+		}
+		tilemap.cells[tilemap_v2_to_idx(tilemap, pos)] = .Floor
+
+		rand_dir := Vec2i_Dirs[rand._system_random() % 4]
+		pos += rand_dir
+		step_count -= 1
+	}
+}
+
+generate_map :: proc(tilemap: ^Tilemap) {
+	walker_cnt :: 20
+	walker_step :: 500
+
+	tilemap_fill(tilemap, .Wall)
+
+	random := rand.create(rand._system_random())
+	floors := make([dynamic]vec2i, 1)
+	floors[0] = vec2i{tilemap.width / 2, tilemap.height / 2}
+	for w in 0 ..< walker_cnt {
+		pos := floors[rand.int31(&random) % i32(len(floors))]
+		generate_map_walker(tilemap, pos, walker_step)
+	}
+}
+
 state_make_gameplay_scene :: proc(state: ^State) -> Scene {
 	scene := scene_empty(state)
-	scene_spawn_entity(&scene, entity_make_text({0, 0}, "GAMEPLAY OVER HERE", 10, true, false))
+	scene.camera.scale = 2
+	// scene_spawn_entity(&scene, entity_make_text({0, 0}, "GAMEPLAY OVER HERE", 10, true, false))
 	scene_spawn_entity(
 		&scene,
 		Entity {
@@ -555,10 +750,31 @@ state_make_gameplay_scene :: proc(state: ^State) -> Scene {
 			scale = 1,
 			sprite = Sprite_Sprites[Sprites.Player],
 			type = .Player,
-			components = {.Sprite},
+			components = {.Sprite, .Collider},
+			coll_aabb = {1, 1, 13, 14},
+			coll_layer = {.Player},
+			coll_mask = {.Tilemap, .Default},
 		},
 	)
-	scene_add_tilemap(&scene, {80, 80}, {16, 16})
+
+	scene_spawn_entity(
+		&scene,
+		Entity {
+			position = {32, 32},
+			scale = 1,
+			sprite = Sprite_Sprites[Sprites.Player],
+			type = .Skeleton,
+			components = {.Sprite, .Collider},
+			coll_aabb = {1, 1, 13, 14},
+			coll_layer = {.Default},
+			coll_mask = {},
+			coll_static = true,
+		},
+	)
+
+	tilemap := scene_add_tilemap(&scene, {100, 100}, {16, 16}, {-50 * 16, -50 * 16})
+	generate_map(tilemap)
+
 	return scene
 }
 
@@ -583,6 +799,7 @@ slurp_file :: proc(file_path: string) -> []byte {
 
 tick_update :: proc(state: ^State) {
 	scene_update(&state.scene)
+	scene_late_update(&state.scene)
 }
 
 render :: proc(state: ^State) {
@@ -688,7 +905,7 @@ main :: proc() {
 
 	// INIT SCENE
 	state.time = SDL.GetTicks()
-	ticktime: u32 = 10000 / 240
+	ticktime: u32 = 1000 / 60
 
 	state.scene = state_make_menu_scene(&state)
 	defer scene_free(&state.scene)
