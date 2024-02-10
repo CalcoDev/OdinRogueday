@@ -11,7 +11,9 @@ of lobotomy kaisen?
 ## Features:
 
 -   Random cave generation (cellular automata)
+
 -   Random dungeon generation (bsp)
+
 -   Dialogue system
     -   Display lines of text on screen
 -   Combat
@@ -32,4 +34,3 @@ of lobotomy kaisen?
     -   Items
     -   Procedural generation
     -   Enemy ai
-    -   Dialogue system

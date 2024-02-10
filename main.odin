@@ -155,40 +155,57 @@ Sprite :: struct {
 // TODO(calco): Maybe add an array thing
 Sprites :: enum {
 	Player,
+	Zombie,
 	ButtonSlice,
 }
 
 Sprite_Sprites :: [Sprites]Sprite {
 	.Player      = {{0, 0}, {16, 16}},
 	.ButtonSlice = {{64, 64}, {16, 16}},
+	.Zombie      = {{16, 0}, {16, 16}},
 }
 
 // Megastruct, Randy style lmao
 Entity :: struct {
-	components:     Components,
-	type:           EntityType,
-	id:             i32,
-	position:       vec2f,
-	scale:          f32,
+	components:              Components,
+	type:                    EntityType,
+	id:                      i32,
+	position:                vec2f,
+	scale:                   f32,
+
+	// health
+	health_max:              i32,
+	health_curr:             i32,
+	on_health_change:        proc(self: ^Entity, old_health: i32, scene: ^Scene),
+	on_death:                proc(self: ^Entity, scene: ^Scene),
+	damage_cooldown:         f32,
+	damage_timer:            f32,
+
+	// hurtbox stuff
+	on_hit_damage:           i32,
 
 	// collisions
-	coll_aabb:      rectf,
-	coll_layer:     Layers,
-	coll_mask:      Layers,
-	coll_static:    bool,
+	coll_aabb:               rectf,
+	coll_layer:              Layers,
+	coll_mask:               Layers,
+	coll_static:             bool,
+	on_collide_tile:         proc(self: ^Entity, tilemap: ^Tilemap, tile: vec2i, scene: ^Scene),
+	should_trigger_collider: proc(self: ^Entity, other: ^Entity, scene: ^Scene) -> bool,
+	on_collide_entity:       proc(self: ^Entity, other: ^Entity, movement: vec2f, scene: ^Scene),
+	on_trigger_entity:       proc(self: ^Entity, other: ^Entity, scene: ^Scene),
 
 	// sprite comp
-	sprite:         Sprite,
+	sprite:                  Sprite,
 
 	// ui 
-	ui_rect:        recti,
-	ui_text:        string,
-	ui_screen:      bool,
+	ui_rect:                 recti,
+	ui_text:                 string,
+	ui_screen:               bool,
 
 	// button
-	ui_btn_onclick: proc(scene: ^Scene, btn: ^Entity),
-	ui_btn_padding: vec2i,
-	ui_btn_down:    bool,
+	ui_btn_onclick:          proc(scene: ^Scene, btn: ^Entity),
+	ui_btn_padding:          vec2i,
+	ui_btn_down:             bool,
 }
 
 Component :: enum {
@@ -196,6 +213,7 @@ Component :: enum {
 	IsCamera,
 	Sprite,
 	Collider,
+	Health,
 	UI_Text,
 	UI_Button, // DOES NOT RENDER UI_TEXT, INSTEAD IT RENDERS A SPRITE
 }
@@ -205,17 +223,119 @@ EntityType :: enum {
 	None = 0,
 	Camera,
 	Player,
-	UI,
 	Skeleton,
 	Zombie,
+	UI,
 }
 
 Layer :: enum {
 	Default,
 	Player,
 	Tilemap,
+	Enemies,
 }
 Layers :: distinct bit_set[Layer]
+
+ENTITY_DAMAGE_COOLDOWN :: 0.1
+
+entity_damage :: proc(entity: ^Entity, amount: i32, scene: ^Scene) {
+	if (entity.damage_timer > 0) {
+		return
+	}
+	entity.damage_timer = entity.damage_cooldown
+
+	old := entity.health_curr
+
+	new_health := max(0, entity.health_curr - amount)
+	diff := entity.health_curr - new_health
+
+	entity.health_curr = new_health
+	if entity.on_health_change != nil {
+		entity.on_health_change(entity, old, scene)
+	}
+	if entity.health_curr == 0 && entity.on_death != nil {
+		entity.on_death(entity, scene)
+	}
+}
+
+entity_heal :: proc(entity: ^Entity, amount: i32, scene: ^Scene) {
+	old := entity.health_curr
+
+	new_health := min(entity.health_max, entity.health_curr + amount)
+	diff := new_health - entity.health_curr
+
+	entity.health_curr = new_health
+	if entity.on_health_change != nil {
+		entity.on_health_change(entity, old, scene)
+	}
+}
+
+entity_make_zombie :: proc(pos: vec2f) -> Entity {
+	return(
+		Entity {
+			type = .Zombie,
+			components = {.Sprite, .Collider, .Health},
+			coll_layer = {.Enemies},
+			coll_mask = {},
+			coll_aabb = {1, 1, 13, 14},
+			coll_static = true,
+			position = pos,
+			sprite = Sprite_Sprites[.Zombie],
+			scale = 1,
+			health_max = 100,
+			health_curr = 100,
+			damage_cooldown = ENTITY_DAMAGE_COOLDOWN,
+			damage_timer = 0,
+			on_hit_damage = 5,
+		} \
+	)
+}
+
+entity_make_player :: proc(pos: vec2f) -> Entity {
+	return(
+		Entity {
+			position = pos,
+			scale = 1,
+			sprite = Sprite_Sprites[Sprites.Player],
+			type = .Player,
+			components = {.Sprite, .Collider, .Health},
+			coll_aabb = {1, 1, 13, 14},
+			coll_layer = {.Player},
+			coll_mask = {.Tilemap, .Enemies},
+			coll_static = true,
+			damage_cooldown = ENTITY_DAMAGE_COOLDOWN,
+			damage_timer = 0,
+			health_curr = 100,
+			health_max = 100,
+			should_trigger_collider = proc(self: ^Entity, other: ^Entity, scene: ^Scene) -> bool {
+				if (other.type == .Zombie) {
+					return true
+				}
+
+				return false
+			},
+			on_collide_entity = proc(
+				self: ^Entity,
+				other: ^Entity,
+				movement: vec2f,
+				scene: ^Scene,
+			) {
+			},
+			on_trigger_entity = proc(self: ^Entity, other: ^Entity, scene: ^Scene) {
+				if (other.type == .Zombie) {
+					entity_damage(self, other.on_hit_damage, scene)
+				}
+			},
+			on_health_change = proc(self: ^Entity, old_health: i32, scene: ^Scene) {
+				// fmt.println("NEW: ", self.health_curr, " | OLD: ", old_health)
+			},
+			on_death = proc(self: ^Entity, scene: ^Scene) {
+				// fmt.println("DIED")
+				state_switch_scene(scene.state, state_make_gameplay_scene(scene.state))
+			},
+		} \
+	)
+}
 
 entity_make_text :: proc(
 	pos: vec2f,
@@ -274,11 +394,13 @@ entity_actor_move :: proc(entity: ^Entity, scene: ^Scene, movement: vec2f) {
 }
 
 entity_update :: proc(entity: ^Entity, scene: ^Scene) {
-	// TODO(calco): MAKE THIS NOT STATIC LMAO
 	@(static)
 	prev_cam_zoom: f32 = 1
 
-	// TODO(calco): Stuff
+	if (entity.components & Components{.Health} != {}) {
+		entity.damage_timer = max(0, entity.damage_timer - scene.state.dt)
+	}
+
 	if (entity.type == .Player) {
 		move := vec2f {
 			f32(
@@ -292,7 +414,6 @@ entity_update :: proc(entity: ^Entity, scene: ^Scene) {
 		}
 		move = linalg.vector_normalize0(move) * 100 * scene.state.dt
 		entity_actor_move(entity, scene, move)
-		// entity.position += move
 
 		// TODO(calco): DEBUG TAKE THIS OUT
 		if scene.state.mouse.buttons[1] == .Pressed {
@@ -303,6 +424,18 @@ entity_update :: proc(entity: ^Entity, scene: ^Scene) {
 		if (entity.scale != prev_cam_zoom) {
 			SDL.RenderSetScale(scene.state.renderer, entity.scale, entity.scale)
 			prev_cam_zoom = entity.scale
+		}
+	} else if (entity.type == .Zombie) {
+		// TODO(calco): Enemy ai
+		// if player is in line of sight then chase him, if he isnt wander aroun
+		has_los := tilemap_has_line_of_sight(
+			&scene.tilemap,
+			entity.position,
+			scene.player.position,
+		)
+		if has_los {
+			move := linalg.normalize0(scene.player.position - entity.position)
+			entity_actor_move(entity, scene, move * 85 * scene.state.dt)
 		}
 	}
 
@@ -334,7 +467,6 @@ rectf_handle_collisions :: proc(
 
 	// Check if entities are overlapping
 	overlap := rectf_get_overlap(e1_rect, e2_rect)
-	fmt.println("OVERLAP: ", overlap, " | R1: ", e1_rect, " | R2: ", e2_rect)
 	if overlap.z < 0 {
 		return {0, 0}
 	}
@@ -370,8 +502,27 @@ _tilemap_collision :: proc(scene: ^Scene, entity: ^Entity, resolve_h: bool, offs
 			{0, 0, 16, 16},
 			resolve_h,
 		)
+		if abs(movement.x) + abs(movement.y) >= 0 && entity.on_collide_tile != nil {
+			entity.on_collide_tile(entity, &scene.tilemap, p, scene)
+		}
 		entity.position += movement
 	}
+}
+
+_entity_test_collision :: proc(e1: ^Entity, e2: ^Entity, scene: ^Scene) -> bool {
+	if e1.should_trigger_collider != nil {
+		if e1.should_trigger_collider(e1, e2, scene) {
+			if e1.on_trigger_entity != nil {
+				e1.on_trigger_entity(e1, e2, scene)
+			}
+			if e2.on_trigger_entity != nil {
+				e2.on_trigger_entity(e1, e2, scene)
+			}
+			return true
+		}
+	}
+
+	return false
 }
 
 entity_no_collisions :: proc(entity: ^Entity, scene: ^Scene, resolve_h: bool) {
@@ -390,9 +541,14 @@ entity_no_collisions :: proc(entity: ^Entity, scene: ^Scene, resolve_h: bool) {
 				continue
 			}
 			if (entity.coll_mask & e2.coll_layer == {}) {
-				continue
+				if (entity.coll_layer & e2.coll_mask == {}) {
+					continue
+				} else {
+					tmp := entity
+					entity := e2
+					e2 := entity
+				}
 			}
-
 
 			movement := rectf_handle_collisions(
 				entity.position,
@@ -401,14 +557,33 @@ entity_no_collisions :: proc(entity: ^Entity, scene: ^Scene, resolve_h: bool) {
 				e2.coll_aabb,
 				resolve_h,
 			)
+			if abs(movement.x) + abs(movement.y) <= 0 {
+				continue
+			}
+
+			_entity_test_collision(entity, e2, scene)
+			_entity_test_collision(e2, entity, scene)
 			if (!entity.coll_static && !e2.coll_static) {
 				movement *= 0.5
 				entity.position += movement
 				e2.position -= movement
+
+				if entity.on_collide_entity != nil {
+					entity.on_collide_entity(entity, e2, movement, scene)
+				}
+				if e2.on_collide_entity != nil {
+					e2.on_collide_entity(entity, e2, -movement, scene)
+				}
 			} else if (e2.coll_static) {
+				if entity.on_collide_entity != nil {
+					entity.on_collide_entity(entity, e2, movement, scene)
+				}
 				entity.position += movement
 			} else {
-				e2.position -= movement
+				if e2.on_collide_entity != nil {
+					e2.on_collide_entity(entity, e2, -movement, scene)
+				}
+				e2.position += -movement
 			}
 		}
 	}
@@ -476,6 +651,46 @@ Tile_Sprites := [Tile]vec2i {
 	.None  = {0, 0},
 	.Wall  = {0, 64},
 	.Floor = {16, 64},
+}
+
+Tile_Visibility := [Tile]bool {
+	.None  = true,
+	.Wall  = false,
+	.Floor = true,
+}
+
+tilemap_has_line_of_sight :: proc(tilemap: ^Tilemap, p1: vec2f, p2: vec2f) -> bool {
+	p1 := tilemap_world_to_tile(tilemap, p1)
+	p2 := tilemap_world_to_tile(tilemap, p2)
+
+	dx := p2.x - p1.x
+	dy := p2.y - p1.y
+	steps := max(abs(dx), abs(dy))
+
+	x_increment := f32(dx) / f32(steps)
+	y_increment := f32(dy) / f32(steps)
+
+	x := f32(p1.x)
+	y := f32(p1.y)
+	idx := tilemap_v2_to_idx(tilemap, p1)
+	tile := tilemap.cells[idx]
+
+	if !Tile_Visibility[tile] {
+		return p1 == p2
+	}
+
+	for s in 0 ..< steps {
+		x += x_increment
+		y += y_increment
+
+		idx = tilemap_v2_to_idx(tilemap, vec2i{i32(x), i32(y)})
+		tile = tilemap.cells[idx]
+		if !Tile_Visibility[tile] {
+			break
+		}
+	}
+
+	return p2 == vec2i{i32(x), i32(y)}
 }
 
 tilemap_world_to_tile :: proc(tilemap: ^Tilemap, pos: vec2f) -> vec2i {
@@ -800,35 +1015,10 @@ generate_map :: proc(tilemap: ^Tilemap) {
 state_make_gameplay_scene :: proc(state: ^State) -> Scene {
 	scene := scene_empty(state)
 	scene.camera.scale = 2
-	// scene_spawn_entity(&scene, entity_make_text({0, 0}, "GAMEPLAY OVER HERE", 10, true, false))
-	scene_spawn_entity(
-		&scene,
-		Entity {
-			position = {0, 0},
-			scale = 1,
-			sprite = Sprite_Sprites[Sprites.Player],
-			type = .Player,
-			components = {.Sprite, .Collider},
-			coll_aabb = {1, 1, 13, 14},
-			coll_layer = {.Player},
-			coll_mask = {.Tilemap, .Default},
-		},
-	)
+	scene_spawn_entity(&scene, entity_make_text({0, 0}, "GAMEPLAY OVER HERE", 10, true, false))
+	scene_spawn_entity(&scene, entity_make_player({0, 0}))
 
-	scene_spawn_entity(
-		&scene,
-		Entity {
-			position = {-32, -32},
-			scale = 1,
-			sprite = Sprite_Sprites[Sprites.Player],
-			type = .Skeleton,
-			components = {.Sprite, .Collider},
-			coll_aabb = {1, 1, 13, 14},
-			coll_layer = {.Default},
-			coll_mask = {},
-			coll_static = true,
-		},
-	)
+	scene_spawn_entity(&scene, entity_make_zombie({64, 64}))
 
 	tilemap := scene_add_tilemap(&scene, {100, 100}, {16, 16}, {-50 * 16, -50 * 16})
 	generate_map(tilemap)
