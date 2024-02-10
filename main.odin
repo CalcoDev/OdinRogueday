@@ -117,6 +117,14 @@ get_text_rect :: proc(s: string, scale: f32, pos: vec2f) -> recti {
 vec2f :: [2]f32
 vec2i :: [2]i32
 
+vec2f_to_i :: proc(v: vec2f) -> vec2i {
+	return (vec2i){i32(v.x), i32(v.y)}
+}
+
+vec2i_to_f :: proc(v: vec2i) -> vec2f {
+	return (vec2f){f32(v.x), f32(v.y)}
+}
+
 Vec2i_Dirs := [4]vec2i{{0, 1}, {1, 0}, {-1, 0}, {0, -1}}
 
 rectf :: [4]f32
@@ -289,6 +297,7 @@ entity_update :: proc(entity: ^Entity, scene: ^Scene) {
 		// TODO(calco): DEBUG TAKE THIS OUT
 		if scene.state.mouse.buttons[1] == .Pressed {
 			generate_map(&scene.tilemap)
+			// fmt.println(tilemap_world_to_tile(&scene.tilemap, entity.position))
 		}
 	} else if (entity.type == .Camera) {
 		if (entity.scale != prev_cam_zoom) {
@@ -313,14 +322,68 @@ entity_update :: proc(entity: ^Entity, scene: ^Scene) {
 	}
 }
 
+rectf_handle_collisions :: proc(
+	p1: vec2f,
+	p2: vec2f,
+	r1: rectf,
+	r2: rectf,
+	resolve_h: bool,
+) -> vec2f {
+	e1_rect := rectf_from_relative(p1, r1)
+	e2_rect := rectf_from_relative(p2, r2)
+
+	// Check if entities are overlapping
+	overlap := rectf_get_overlap(e1_rect, e2_rect)
+	fmt.println("OVERLAP: ", overlap, " | R1: ", e1_rect, " | R2: ", e2_rect)
+	if overlap.z < 0 {
+		return {0, 0}
+	}
+
+	// WE ARE COLLIDING
+	movement := vec2f{overlap.z, overlap.w} * 1.02
+	if (resolve_h) {
+		movement.y = 0
+	} else {
+		movement.x = 0
+	}
+
+	if (p1.x < p2.x) {
+		movement.x *= -1
+	}
+	if (p1.y < p2.y) {
+		movement.y *= -1
+	}
+
+	return movement
+}
+
+_tilemap_collision :: proc(scene: ^Scene, entity: ^Entity, resolve_h: bool, offset: vec2f) {
+	p := tilemap_world_to_tile(
+		&scene.tilemap,
+		entity.position + entity.coll_aabb.xy + offset * entity.coll_aabb.zw,
+	)
+	if (scene.tilemap.cells[tilemap_v2_to_idx(&scene.tilemap, p)] == .Wall) {
+		movement := rectf_handle_collisions(
+			entity.position,
+			tilemap_tile_to_world(&scene.tilemap, p),
+			entity.coll_aabb,
+			{0, 0, 16, 16},
+			resolve_h,
+		)
+		entity.position += movement
+	}
+}
+
 entity_no_collisions :: proc(entity: ^Entity, scene: ^Scene, resolve_h: bool) {
 	if (entity.components & Components{.Collider} != {}) {
 		// TILEMAP collisions
 		if (entity.coll_mask & Layers{.Tilemap} != {}) {
-			// TODO(calco): tilemap collision
+			_tilemap_collision(scene, entity, resolve_h, {0, 0})
+			_tilemap_collision(scene, entity, resolve_h, {1, 0})
+			_tilemap_collision(scene, entity, resolve_h, {0, 1})
+			_tilemap_collision(scene, entity, resolve_h, {1, 1})
 		}
 
-		// TODO(Calco)): stop looping, have some hash thing
 		for e2 in &scene.entities {
 			e2 := &e2
 			if (e2 == entity || e2.components & Components{.Collider} == {}) {
@@ -330,30 +393,14 @@ entity_no_collisions :: proc(entity: ^Entity, scene: ^Scene, resolve_h: bool) {
 				continue
 			}
 
-			e1_rect := rectf_from_relative(entity.position, entity.coll_aabb)
-			e2_rect := rectf_from_relative(e2.position, e2.coll_aabb)
 
-			// Check if entities are overlapping
-			overlap := rectf_get_overlap(e1_rect, e2_rect)
-			if overlap.x <= 0 {
-				continue
-			}
-
-			// WE ARE COLLIDING
-			movement := vec2f{overlap.z, overlap.w} * 1.02
-			if (resolve_h) {
-				movement.y = 0
-			} else {
-				movement.x = 0
-			}
-
-			if (entity.position.x < e2.position.x) {
-				movement.x *= -1
-			}
-			if (entity.position.y < e2.position.y) {
-				movement.y *= -1
-			}
-
+			movement := rectf_handle_collisions(
+				entity.position,
+				e2.position,
+				entity.coll_aabb,
+				e2.coll_aabb,
+				resolve_h,
+			)
 			if (!entity.coll_static && !e2.coll_static) {
 				movement *= 0.5
 				entity.position += movement
@@ -364,7 +411,6 @@ entity_no_collisions :: proc(entity: ^Entity, scene: ^Scene, resolve_h: bool) {
 				e2.position -= movement
 			}
 		}
-
 	}
 }
 
@@ -430,6 +476,18 @@ Tile_Sprites := [Tile]vec2i {
 	.None  = {0, 0},
 	.Wall  = {0, 64},
 	.Floor = {16, 64},
+}
+
+tilemap_world_to_tile :: proc(tilemap: ^Tilemap, pos: vec2f) -> vec2i {
+	pos := (pos - tilemap.position) / vec2f{f32(tilemap.tile_size.x), f32(tilemap.tile_size.y)}
+	return vec2i{i32(pos.x), i32(pos.y)}
+}
+
+tilemap_tile_to_world :: proc(tilemap: ^Tilemap, pos: vec2i) -> vec2f {
+	return(
+		tilemap.position +
+		vec2f{f32(pos.x * tilemap.tile_size.x), f32(pos.y * tilemap.tile_size.y)} \
+	)
 }
 
 tilemap_in_bounds :: proc(tilemap: ^Tilemap, pos: vec2i) -> bool {
@@ -760,7 +818,7 @@ state_make_gameplay_scene :: proc(state: ^State) -> Scene {
 	scene_spawn_entity(
 		&scene,
 		Entity {
-			position = {32, 32},
+			position = {-32, -32},
 			scale = 1,
 			sprite = Sprite_Sprites[Sprites.Player],
 			type = .Skeleton,
