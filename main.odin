@@ -2,6 +2,7 @@ package main
 
 import "core:c/libc"
 import "core:fmt"
+import math "core:math"
 import linalg "core:math/linalg"
 import rand "core:math/rand"
 import "core:os"
@@ -117,6 +118,10 @@ get_text_rect :: proc(s: string, scale: f32, pos: vec2f) -> recti {
 vec2f :: [2]f32
 vec2i :: [2]i32
 
+vec2f_from_angle :: proc(angle: f32) -> vec2f {
+	return vec2f{math.cos_f32(angle), math.sin_f32(angle)}
+}
+
 vec2f_to_i :: proc(v: vec2f) -> vec2i {
 	return (vec2i){i32(v.x), i32(v.y)}
 }
@@ -173,6 +178,9 @@ Entity :: struct {
 	position:                vec2f,
 	scale:                   f32,
 
+	// actors
+	speed:                   f32,
+
 	// health
 	health_max:              i32,
 	health_curr:             i32,
@@ -194,6 +202,16 @@ Entity :: struct {
 	on_collide_entity:       proc(self: ^Entity, other: ^Entity, movement: vec2f, scene: ^Scene),
 	on_trigger_entity:       proc(self: ^Entity, other: ^Entity, scene: ^Scene),
 
+	// wandering
+	wander_speed_mult:       f32,
+	wander_cooldown:         f32,
+	wander_timer:            f32,
+	wander_target:           vec2f,
+	wander_range:            f32,
+	prev_wander_target:      vec2f,
+	wander_old_spot:         bool,
+	is_wandering:            bool,
+
 	// sprite comp
 	sprite:                  Sprite,
 
@@ -214,6 +232,7 @@ Component :: enum {
 	Sprite,
 	Collider,
 	Health,
+	Wander,
 	UI_Text,
 	UI_Button, // DOES NOT RENDER UI_TEXT, INSTEAD IT RENDERS A SPRITE
 }
@@ -237,6 +256,21 @@ Layer :: enum {
 Layers :: distinct bit_set[Layer]
 
 ENTITY_DAMAGE_COOLDOWN :: 0.1
+
+entity_start_wander :: proc(entity: ^Entity, pos: vec2f, same_place: bool) {
+	entity.is_wandering = true
+	entity.wander_timer = entity.wander_cooldown
+	entity.wander_target = pos
+	entity.wander_old_spot = same_place
+	if (same_place) {
+		entity.prev_wander_target = pos
+	}
+}
+
+entity_stop_wander :: proc(entity: ^Entity) {
+	entity.is_wandering = false
+	entity.wander_target = 0
+}
 
 entity_damage :: proc(entity: ^Entity, amount: i32, scene: ^Scene) {
 	if (entity.damage_timer > 0) {
@@ -274,9 +308,9 @@ entity_make_zombie :: proc(pos: vec2f) -> Entity {
 	return(
 		Entity {
 			type = .Zombie,
-			components = {.Sprite, .Collider, .Health},
+			components = {.Sprite, .Collider, .Health, .Wander},
 			coll_layer = {.Enemies},
-			coll_mask = {},
+			coll_mask = {.Tilemap},
 			coll_aabb = {1, 1, 13, 14},
 			coll_static = true,
 			position = pos,
@@ -287,6 +321,15 @@ entity_make_zombie :: proc(pos: vec2f) -> Entity {
 			damage_cooldown = ENTITY_DAMAGE_COOLDOWN,
 			damage_timer = 0,
 			on_hit_damage = 5,
+			wander_cooldown = 2,
+			wander_timer = 0,
+			wander_speed_mult = 0.5,
+			is_wandering = false,
+			wander_range = 64,
+			wander_target = {0, 0},
+			prev_wander_target = {0, 0},
+			wander_old_spot = true,
+			speed = 75,
 		} \
 	)
 }
@@ -307,6 +350,7 @@ entity_make_player :: proc(pos: vec2f) -> Entity {
 			damage_timer = 0,
 			health_curr = 100,
 			health_max = 100,
+			speed = 100,
 			should_trigger_collider = proc(self: ^Entity, other: ^Entity, scene: ^Scene) -> bool {
 				if (other.type == .Zombie) {
 					return true
@@ -327,11 +371,11 @@ entity_make_player :: proc(pos: vec2f) -> Entity {
 				}
 			},
 			on_health_change = proc(self: ^Entity, old_health: i32, scene: ^Scene) {
-				// fmt.println("NEW: ", self.health_curr, " | OLD: ", old_health)
+				fmt.println("NEW: ", self.health_curr, " | OLD: ", old_health)
 			},
 			on_death = proc(self: ^Entity, scene: ^Scene) {
-				// fmt.println("DIED")
-				state_switch_scene(scene.state, state_make_gameplay_scene(scene.state))
+				fmt.println("DIED")
+				// state_switch_scene(scene.state, state_make_gameplay_scene(scene.state))
 			},
 		} \
 	)
@@ -412,7 +456,7 @@ entity_update :: proc(entity: ^Entity, scene: ^Scene) {
 				i32(scene.state.keys[SDL.Keycode.W] == .Down),
 			),
 		}
-		move = linalg.vector_normalize0(move) * 100 * scene.state.dt
+		move = linalg.vector_normalize0(move) * entity.speed * scene.state.dt
 		entity_actor_move(entity, scene, move)
 
 		// TODO(calco): DEBUG TAKE THIS OUT
@@ -426,17 +470,46 @@ entity_update :: proc(entity: ^Entity, scene: ^Scene) {
 			prev_cam_zoom = entity.scale
 		}
 	} else if (entity.type == .Zombie) {
-		// TODO(calco): Enemy ai
-		// if player is in line of sight then chase him, if he isnt wander aroun
 		has_los := tilemap_has_line_of_sight(
 			&scene.tilemap,
 			entity.position,
 			scene.player.position,
 		)
+
 		if has_los {
-			move := linalg.normalize0(scene.player.position - entity.position)
-			entity_actor_move(entity, scene, move * 85 * scene.state.dt)
+			if (entity.is_wandering) {
+				entity_stop_wander(entity)
+			}
+
+			move :=
+				linalg.normalize0(scene.player.position - entity.position) *
+				entity.speed *
+				scene.state.dt
+			entity_actor_move(entity, scene, move)
+		} else if (!entity.is_wandering) {
+			entity_start_wander(entity, entity.position, true)
 		}
+	}
+
+	if (entity.components & Components{.Wander} != {} && entity.is_wandering) {
+		// If reached target, get new target
+		entity.wander_timer = max(0, entity.wander_timer - scene.state.dt)
+
+		if (entity.wander_timer == 0 ||
+			   linalg.length2(entity.wander_target - entity.position) < 0.05) {
+			random := rand.create(rand._system_random())
+			theta := rand.float32_range(0, math.TAU)
+			dist := rand.float32_range(0.4, 1.2) * entity.wander_range
+
+			if entity.wander_old_spot {
+				entity.wander_target = entity.prev_wander_target
+			}
+			entity.wander_target += vec2f_from_angle(theta) * dist
+			entity.wander_timer = entity.wander_cooldown
+		}
+
+		dir := linalg.normalize0(entity.wander_target - entity.position)
+		entity_actor_move(entity, scene, dir * entity.speed * scene.state.dt)
 	}
 
 	if (entity.components & Components{.UI_Button} != {}) {
@@ -686,11 +759,11 @@ tilemap_has_line_of_sight :: proc(tilemap: ^Tilemap, p1: vec2f, p2: vec2f) -> bo
 		idx = tilemap_v2_to_idx(tilemap, vec2i{i32(x), i32(y)})
 		tile = tilemap.cells[idx]
 		if !Tile_Visibility[tile] {
-			break
+			return false
 		}
 	}
 
-	return p2 == vec2i{i32(x), i32(y)}
+	return true
 }
 
 tilemap_world_to_tile :: proc(tilemap: ^Tilemap, pos: vec2f) -> vec2i {
@@ -1015,7 +1088,7 @@ generate_map :: proc(tilemap: ^Tilemap) {
 state_make_gameplay_scene :: proc(state: ^State) -> Scene {
 	scene := scene_empty(state)
 	scene.camera.scale = 2
-	scene_spawn_entity(&scene, entity_make_text({0, 0}, "GAMEPLAY OVER HERE", 10, true, false))
+	// scene_spawn_entity(&scene, entity_make_text({0, 0}, "GAMEPLAY OVER HERE", 10, true, false))
 	scene_spawn_entity(&scene, entity_make_player({0, 0}))
 
 	scene_spawn_entity(&scene, entity_make_zombie({64, 64}))
