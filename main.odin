@@ -131,6 +131,19 @@ get_text_rect :: proc(s: string, scale: f32, pos: vec2f) -> recti {
 vec2f :: [2]f32
 vec2i :: [2]i32
 
+vec2f_rotate :: proc(v: vec2f, theta: f32) -> vec2f {
+	cos := math.cos_f32(theta)
+	sin := math.sin_f32(theta)
+
+	return (vec2f){v.x * cos - v.y * sin, v.x * sin + v.y * cos}
+}
+
+vec2f_random_dir :: proc() -> vec2f {
+	random := rand.create(rand._system_random())
+	angle := rand.float32_range(0, 2 * math.PI)
+	return vec2f_from_angle(angle)
+}
+
 vec2f_to_angle :: proc(vec: vec2f) -> f32 {
 	return math.atan2_f32(vec.y, vec.x)
 }
@@ -180,104 +193,131 @@ Sprites :: enum {
 	Player,
 	Zombie,
 	Skeleton,
+	CryingWizard,
+	Allamir,
 	Arrow,
 	Fireball,
 	Shadowflame,
+	Melee,
 	ButtonSlice,
 }
 
 Sprite_Sprites :: [Sprites]Sprite {
-	.None        = {{-1, -1}, {-1, -1}},
-	.Player      = {{0, 0}, {16, 16}},
-	.ButtonSlice = {{64, 64}, {16, 16}},
-	.Zombie      = {{16, 0}, {16, 16}},
-	.Skeleton    = {{32, 0}, {16, 16}},
-	.Arrow       = {{0, 16}, {16, 16}},
-	.Fireball    = {{16, 16}, {16, 16}},
-	.Shadowflame = {{32, 16}, {16, 16}},
+	.None         = {{-1, -1}, {-1, -1}},
+	.Player       = {{0, 0}, {16, 16}},
+	.ButtonSlice  = {{64, 64}, {16, 16}},
+	.Zombie       = {{16, 0}, {16, 16}},
+	.Skeleton     = {{32, 0}, {16, 16}},
+	.Arrow        = {{0, 16}, {16, 16}},
+	.Fireball     = {{16, 16}, {16, 16}},
+	.Shadowflame  = {{32, 16}, {16, 16}},
+	.Allamir      = {{64, 0}, {32, 32}},
+	.CryingWizard = {{48, 0}, {16, 16}},
+	.Melee        = {{48, 16}, {16, 16}},
 }
 Sprite_AABB := [Sprites]rectf {
-	.None        = {-1, -1, -1, -1},
-	.ButtonSlice = {-1, -1, -1, -1},
-	.Player      = {1, 1, 13, 14},
-	.Zombie      = {},
-	.Skeleton    = {3, 2, 10, 12},
-	.Arrow       = {1, 3, 14, 14},
-	.Fireball    = {1, 1, 15, 15},
-	.Shadowflame = {5, 5, 7, 7},
+	.None         = {-1, -1, -1, -1},
+	.ButtonSlice  = {-1, -1, -1, -1},
+	.Player       = {1, 1, 13, 14},
+	.Zombie       = {1, 1, 13, 14},
+	.Skeleton     = {3, 2, 10, 12},
+	.Arrow        = {1, 3, 14, 14},
+	.Fireball     = {1, 1, 14, 14},
+	.Shadowflame  = {5, 5, 7, 7},
+	.CryingWizard = {1, 1, 14, 14},
+	.Allamir      = {3, 0, 26, 32},
+	.Melee        = {1, 0, 14, 16},
 }
 
 // Megastruct, Randy style lmao
 Entity :: struct {
-	components:              Components,
-	type:                    EntityType,
-	id:                      i32,
-	position:                vec2f,
-	scale:                   f32,
+	components:                   Components,
+	type:                         EntityType,
+	id:                           i32,
+	position:                     vec2f,
+	scale:                        f32,
 
 	// actors
-	speed:                   f32,
-	knockback:               vec2f,
+	speed:                        f32,
+	knockback:                    vec2f,
 
 	// health
-	health_max:              i32,
-	health_curr:             i32,
-	on_health_change:        proc(self: ^Entity, old_health: i32, scene: ^Scene),
-	on_death:                proc(self: ^Entity, scene: ^Scene),
-	damage_cooldown:         f32,
-	damage_timer:            f32,
+	health_max:                   i32,
+	health_curr:                  i32,
+	on_health_change:             proc(self: ^Entity, old_health: i32, scene: ^Scene),
+	on_death:                     proc(self: ^Entity, scene: ^Scene),
+	damage_cooldown:              f32,
+	damage_timer:                 f32,
 
 	// hurtbox stuff
-	hurtbox_damage:          i32,
-	hurtbox_continuous:      bool,
-	hurtbox_knockback:       f32,
-	hurtbox_prev_hurt:       ^Entity,
+	hurtbox_damage:               i32,
+	hurtbox_continuous:           bool,
+	hurtbox_knockback:            f32,
+	hurtbox_prev_hurt:            ^Entity,
+	hurtbox_reset_timer:          f32,
 
 	// collisions
-	coll_aabb:               rectf,
-	coll_layer:              Layers,
-	coll_mask:               Layers,
-	coll_static:             bool,
-	on_collide_tile:         proc(self: ^Entity, tilemap: ^Tilemap, tile: vec2i, scene: ^Scene),
-	should_trigger_collider: proc(self: ^Entity, other: ^Entity, scene: ^Scene) -> bool,
-	on_collide_entity:       proc(self: ^Entity, other: ^Entity, movement: vec2f, scene: ^Scene),
-	on_trigger_entity:       proc(self: ^Entity, other: ^Entity, scene: ^Scene),
+	coll_aabb:                    rectf,
+	coll_layer:                   Layers,
+	coll_mask:                    Layers,
+	coll_static:                  bool,
+	on_collide_tile:              proc(
+		self: ^Entity,
+		tilemap: ^Tilemap,
+		tile: vec2i,
+		scene: ^Scene,
+	),
+	should_trigger_collider:      proc(self: ^Entity, other: ^Entity, scene: ^Scene) -> bool,
+	on_collide_entity:            proc(
+		self: ^Entity,
+		other: ^Entity,
+		movement: vec2f,
+		scene: ^Scene,
+	),
+	on_trigger_entity:            proc(self: ^Entity, other: ^Entity, scene: ^Scene),
 
 	// wandering
-	wander_speed_mult:       f32,
-	wander_cooldown:         f32,
-	wander_timer:            f32,
-	wander_target:           vec2f,
-	wander_range:            f32,
-	prev_wander_target:      vec2f,
-	wander_old_spot:         bool,
-	is_wandering:            bool,
+	wander_speed_mult:            f32,
+	wander_cooldown:              f32,
+	wander_timer:                 f32,
+	wander_target:                vec2f,
+	wander_range:                 f32,
+	prev_wander_target:           vec2f,
+	wander_old_spot:              bool,
+	is_wandering:                 bool,
 
 	// projectile
-	proj_dir:                vec2f,
-	proj_rotate:             bool,
+	proj_dir:                     vec2f,
+	proj_rotate:                  bool,
 
 	// caster
-	caster_delay:            f32,
-	caster_timer:            f32,
-	caster_make_projectile:  proc(pos: vec2f) -> Entity,
+	caster_delay:                 f32,
+	caster_timer:                 f32,
+	caster_make_projectile:       proc(pos: vec2f) -> Entity,
 
 	// faction
-	faction:                 Faction,
+	faction:                      Faction,
+
+	// crying wizard
+	cry_wiz_craze_cooldown_timer: f32,
+	cry_wiz_craze_duration_timer: f32,
+	cry_wiz_is_crazed:            bool,
+
+	// allamir stuff, code a bossfight somehow lmfao
 
 	// sprite comp
-	sprite:                  Sprite,
-	rotation:                f32,
+	sprite:                       Sprite,
+	rotation:                     f32,
 
 	// ui 
-	ui_rect:                 recti,
-	ui_text:                 string,
-	ui_screen:               bool,
+	ui_rect:                      recti,
+	ui_text:                      string,
+	ui_screen:                    bool,
 
 	// button
-	ui_btn_onclick:          proc(scene: ^Scene, btn: ^Entity),
-	ui_btn_padding:          vec2i,
-	ui_btn_down:             bool,
+	ui_btn_onclick:               proc(scene: ^Scene, btn: ^Entity),
+	ui_btn_padding:               vec2i,
+	ui_btn_down:                  bool,
 }
 
 Component :: enum {
@@ -311,18 +351,10 @@ EntityType :: enum {
 	Arrow,
 	Fireball,
 	Shadowflame,
+	CryingWizard,
+	Allamir,
+	Melee,
 	UI,
-}
-EntityType_Sprite := [EntityType]Sprites {
-	.None        = .None,
-	.Camera      = .None,
-	.UI          = .None,
-	.Player      = .Player,
-	.Zombie      = .Zombie,
-	.Skeleton    = .Skeleton,
-	.Arrow       = .Arrow,
-	.Fireball    = .Fireball,
-	.Shadowflame = .Shadowflame,
 }
 
 Layer :: enum {
@@ -383,7 +415,9 @@ entity_damage :: proc(entity: ^Entity, amount: i32, scene: ^Scene) -> bool {
 }
 
 entity_hurtbox_hit :: proc(entity: ^Entity, hurtbox: ^Entity, scene: ^Scene) {
-	if !hurtbox.hurtbox_continuous && hurtbox.hurtbox_prev_hurt == entity {
+	if hurtbox.hurtbox_reset_timer > 0 &&
+	   !hurtbox.hurtbox_continuous &&
+	   hurtbox.hurtbox_prev_hurt == entity {
 		return
 	}
 
@@ -410,13 +444,22 @@ entity_make_zombie :: proc(pos: vec2f) -> Entity {
 	return(
 		Entity {
 			type = .Zombie,
-			components = {.Sprite, .Collider, .Health, .Wander, .Faction, .Hurtbox, .Actor},
+			components =  {
+				.Sprite,
+				.Collider,
+				.Caster,
+				.Health,
+				.Wander,
+				.Faction,
+				.Hurtbox,
+				.Actor,
+			},
 			hurtbox_continuous = true,
 			hurtbox_knockback = 16,
 			hurtbox_prev_hurt = nil,
 			faction = .Enemy,
 			coll_layer = {.Enemies},
-			coll_mask = {.Tilemap},
+			coll_mask = {.Tilemap, .Projectiles},
 			coll_aabb = Sprite_AABB[.Zombie],
 			coll_static = true,
 			position = pos,
@@ -435,7 +478,67 @@ entity_make_zombie :: proc(pos: vec2f) -> Entity {
 			wander_target = {0, 0},
 			prev_wander_target = {0, 0},
 			wander_old_spot = true,
-			speed = 75,
+			speed = 65,
+			rotation = 0,
+			on_trigger_entity = proc(self: ^Entity, other: ^Entity, scene: ^Scene) {
+				fmt.println("AAAAAA")
+				if (self.faction == other.faction) {
+					return
+				}
+				entity_hurtbox_hit(other, self, scene)
+			},
+			on_health_change = proc(self: ^Entity, old_health: i32, scene: ^Scene) {
+				fmt.println("AAAAAA")
+			},
+			on_death = proc(self: ^Entity, scene: ^Scene) {
+				scene.mobs_left -= 1
+				scene_despawn_entity(scene, self)
+			},
+		} \
+	)
+}
+
+entity_make_allamir :: proc(pos: vec2f) -> Entity {
+	return(
+		Entity {
+			type = .Allamir,
+			components =  {
+				.Sprite,
+				.Collider,
+				.Health,
+				.Wander,
+				.Caster,
+				.Faction,
+				.Hurtbox,
+				.Actor,
+			},
+			faction = .Enemy,
+			coll_layer = {.Enemies},
+			coll_mask = {.Tilemap, .Projectiles},
+			coll_aabb = Sprite_AABB[.Allamir],
+			coll_static = true,
+			position = pos,
+			sprite = Sprite_Sprites[.Allamir],
+			scale = 1,
+			health_max = 200,
+			health_curr = 200,
+			damage_cooldown = ENTITY_DAMAGE_COOLDOWN,
+			damage_timer = 0,
+			hurtbox_damage = 0,
+			hurtbox_continuous = false,
+			hurtbox_knockback = 64,
+			hurtbox_prev_hurt = nil,
+			wander_cooldown = 5,
+			wander_timer = 0,
+			wander_speed_mult = 0.25,
+			is_wandering = false,
+			wander_range = 128,
+			wander_target = {0, 0},
+			prev_wander_target = {0, 0},
+			wander_old_spot = true,
+			speed = 15,
+			caster_delay = 0,
+			caster_timer = 0,
 			rotation = 0,
 			on_trigger_entity = proc(self: ^Entity, other: ^Entity, scene: ^Scene) {
 				if (self.faction == other.faction) {
@@ -443,10 +546,90 @@ entity_make_zombie :: proc(pos: vec2f) -> Entity {
 				}
 				entity_hurtbox_hit(other, self, scene)
 			},
+			on_death = proc(self: ^Entity, scene: ^Scene) {
+				scene.mobs_left -= 1
+				scene_despawn_entity(scene, self)
+			},
 		} \
 	)
 }
 
+entity_make_crying_wizard :: proc(pos: vec2f) -> Entity {
+	return(
+		Entity {
+			type = .CryingWizard,
+			components =  {
+				.Sprite,
+				.Collider,
+				.Health,
+				.Wander,
+				.Caster,
+				.Faction,
+				.Hurtbox,
+				.Actor,
+			},
+			faction = .Enemy,
+			coll_layer = {.Enemies},
+			coll_mask = {.Tilemap, .Projectiles},
+			coll_aabb = Sprite_AABB[.CryingWizard],
+			coll_static = true,
+			position = pos,
+			sprite = Sprite_Sprites[.CryingWizard],
+			scale = 1,
+			health_max = 10,
+			health_curr = 10,
+			damage_cooldown = ENTITY_DAMAGE_COOLDOWN,
+			damage_timer = 0,
+			hurtbox_damage = 1,
+			hurtbox_continuous = true,
+			hurtbox_knockback = 8,
+			hurtbox_prev_hurt = nil,
+			wander_cooldown = 1,
+			wander_timer = 0,
+			wander_speed_mult = 2,
+			is_wandering = false,
+			wander_range = 64,
+			wander_target = {0, 0},
+			prev_wander_target = {0, 0},
+			wander_old_spot = true,
+			speed = 100,
+			caster_delay = 0.75,
+			caster_timer = 0,
+			rotation = 0,
+			cry_wiz_is_crazed = false,
+			cry_wiz_craze_cooldown_timer = 0,
+			cry_wiz_craze_duration_timer = 0,
+			caster_make_projectile = proc(pos: vec2f) -> Entity {
+				@(static)
+				stage := -1
+				stage = (stage + 1) % 3
+
+				switch stage {
+				case 0:
+				case 1:
+					return entity_make_arrow(pos, .Enemy)
+				case 2:
+					if rand._system_random() % 100 < 10 {
+						return entity_make_fireball(pos, .Enemy)
+					}
+					return entity_make_shadowflame(pos, .Enemy)
+				}
+
+				return entity_make_arrow(pos, .Enemy)
+			},
+			on_trigger_entity = proc(self: ^Entity, other: ^Entity, scene: ^Scene) {
+				if (self.faction == other.faction) {
+					return
+				}
+				entity_hurtbox_hit(other, self, scene)
+			},
+			on_death = proc(self: ^Entity, scene: ^Scene) {
+				scene.mobs_left -= 1
+				scene_despawn_entity(scene, self)
+			},
+		} \
+	)
+}
 entity_make_skeleton :: proc(pos: vec2f) -> Entity {
 	return(
 		Entity {
@@ -463,8 +646,8 @@ entity_make_skeleton :: proc(pos: vec2f) -> Entity {
 			},
 			faction = .Enemy,
 			coll_layer = {.Enemies},
-			coll_mask = {.Tilemap},
-			coll_aabb = {3, 2, 10, 12},
+			coll_mask = {.Tilemap, .Projectiles},
+			coll_aabb = Sprite_AABB[.Skeleton],
 			coll_static = true,
 			position = pos,
 			sprite = Sprite_Sprites[.Skeleton],
@@ -498,6 +681,10 @@ entity_make_skeleton :: proc(pos: vec2f) -> Entity {
 				}
 				entity_hurtbox_hit(other, self, scene)
 			},
+			on_death = proc(self: ^Entity, scene: ^Scene) {
+				scene.mobs_left -= 1
+				scene_despawn_entity(scene, self)
+			},
 		} \
 	)
 }
@@ -509,7 +696,7 @@ entity_make_player :: proc(pos: vec2f) -> Entity {
 			scale = 1,
 			sprite = Sprite_Sprites[Sprites.Player],
 			type = .Player,
-			components = {.Sprite, .Collider, .Health, .Faction, .Actor},
+			components = {.Sprite, .Collider, .Health, .Faction, .Actor, .Caster},
 			faction = .Player,
 			coll_aabb = Sprite_AABB[.Player],
 			coll_layer = {.Player},
@@ -526,7 +713,10 @@ entity_make_player :: proc(pos: vec2f) -> Entity {
 					   other.type == .Skeleton ||
 					   other.type == .Arrow ||
 					   other.type == .Fireball ||
-					   other.type == .Shadowflame) {
+					   other.type == .Shadowflame ||
+					   other.type == .Allamir ||
+					   other.type == .CryingWizard ||
+					   other.type == .Melee) {
 					return true
 				}
 
@@ -548,13 +738,134 @@ entity_make_player :: proc(pos: vec2f) -> Entity {
 				fmt.println("NEW: ", self.health_curr, " | OLD: ", old_health)
 			},
 			on_death = proc(self: ^Entity, scene: ^Scene) {
-				fmt.println("DIED")
-				// state_switch_scene(scene.state, state_make_gameplay_scene(scene.state))
+				state_switch_scene(scene.state, state_make_gameover_scene(scene.state))
+			},
+			caster_delay = 0.2,
+			caster_timer = 0,
+			caster_make_projectile = proc(pos: vec2f) -> Entity {
+				return entity_make_melee(pos, .Player)
 			},
 		} \
 	)
 }
 
+entity_make_shadowflame :: proc(pos: vec2f, faction: Faction) -> Entity {
+	return(
+		Entity {
+			type = .Shadowflame,
+			components = {.Sprite, .Collider, .Projectile, .Faction, .Hurtbox},
+			faction = faction,
+			hurtbox_continuous = false,
+			hurtbox_knockback = 8,
+			hurtbox_prev_hurt = nil,
+			coll_layer = {.Projectiles},
+			coll_aabb = Sprite_AABB[.Shadowflame],
+			coll_mask = {.Tilemap},
+			coll_static = true,
+			position = pos,
+			sprite = Sprite_Sprites[.Shadowflame],
+			scale = 1,
+			rotation = 0,
+			hurtbox_damage = 10,
+			speed = 150,
+			proj_dir = {0, 0},
+			proj_rotate = true,
+			on_collide_tile = proc(self: ^Entity, tilemap: ^Tilemap, tile: vec2i, scene: ^Scene) {
+				// TODO(calco): SHADOWFLAME EXPLOSION
+				scene_despawn_entity(scene, self)
+			},
+			on_trigger_entity = proc(self: ^Entity, other: ^Entity, scene: ^Scene) {
+				if (self.faction == other.faction) {
+					return
+				}
+				entity_hurtbox_hit(other, self, scene)
+			},
+		} \
+	)
+}
+
+entity_make_melee :: proc(pos: vec2f, faction: Faction) -> Entity {
+	return(
+		Entity {
+			type = .Melee,
+			components = {.Sprite, .Collider, .Projectile, .Faction, .Hurtbox},
+			faction = faction,
+			hurtbox_continuous = false,
+			hurtbox_knockback = 8,
+			hurtbox_prev_hurt = nil,
+			coll_layer = {.Projectiles},
+			coll_aabb = Sprite_AABB[.Melee],
+			coll_mask = {.Tilemap},
+			coll_static = true,
+			position = pos,
+			sprite = Sprite_Sprites[.Melee],
+			scale = 1,
+			rotation = 0,
+			hurtbox_damage = 100,
+			speed = 500,
+			proj_dir = {0, 0},
+			proj_rotate = true,
+			wander_timer = 0.5,
+			on_collide_tile = proc(self: ^Entity, tilemap: ^Tilemap, tile: vec2i, scene: ^Scene) {
+				// TODO(calco): SHADOWFLAME EXPLOSION
+				scene_despawn_entity(scene, self)
+			},
+			on_trigger_entity = proc(self: ^Entity, other: ^Entity, scene: ^Scene) {
+				if (self.faction == other.faction) {
+					return
+				}
+				entity_hurtbox_hit(other, self, scene)
+			},
+			should_trigger_collider = proc(self: ^Entity, other: ^Entity, scene: ^Scene) -> bool {
+				if other.type == .Zombie || other.faction != self.faction {
+					return true
+				}
+				return false
+			},
+		} \
+	)
+}
+
+entity_make_fireball :: proc(pos: vec2f, faction: Faction) -> Entity {
+	return(
+		Entity {
+			type = .Fireball,
+			components = {.Sprite, .Collider, .Projectile, .Faction, .Hurtbox},
+			faction = faction,
+			hurtbox_continuous = false,
+			hurtbox_knockback = 8,
+			hurtbox_prev_hurt = nil,
+			coll_layer = {.Projectiles},
+			coll_aabb = Sprite_AABB[.Fireball],
+			coll_mask = {.Tilemap},
+			coll_static = true,
+			position = pos,
+			sprite = Sprite_Sprites[.Fireball],
+			scale = 1,
+			rotation = 0,
+			hurtbox_damage = 10,
+			speed = 300,
+			proj_dir = {0, 0},
+			proj_rotate = true,
+			on_collide_tile = proc(self: ^Entity, tilemap: ^Tilemap, tile: vec2i, scene: ^Scene) {
+				// TODO(calco): FIREBALL EXPLOSION
+				scene_despawn_entity(scene, self)
+			},
+			on_trigger_entity = proc(self: ^Entity, other: ^Entity, scene: ^Scene) {
+				if (self.faction == other.faction) {
+					return
+				}
+				entity_hurtbox_hit(other, self, scene)
+			},
+			should_trigger_collider = proc(self: ^Entity, other: ^Entity, scene: ^Scene) -> bool {
+				if other.faction != self.faction {
+					return true
+				}
+				return false
+			},
+		} \
+	)
+}
 entity_make_arrow :: proc(pos: vec2f, faction: Faction) -> Entity {
 	return(
 		Entity {
@@ -573,9 +884,15 @@ entity_make_arrow :: proc(pos: vec2f, faction: Faction) -> Entity {
 			scale = 1,
 			rotation = 0,
 			hurtbox_damage = 10,
-			speed = 150,
+			speed = 200,
 			proj_dir = {0, 0},
 			proj_rotate = true,
+			should_trigger_collider = proc(self: ^Entity, other: ^Entity, scene: ^Scene) -> bool {
+				if other.faction != self.faction {
+					return true
+				}
+				return false
+			},
 			on_collide_tile = proc(self: ^Entity, tilemap: ^Tilemap, tile: vec2i, scene: ^Scene) {
 				scene_despawn_entity(scene, self)
 			},
@@ -653,7 +970,16 @@ entity_update :: proc(entity: ^Entity, scene: ^Scene) {
 		entity.damage_timer = max(0, entity.damage_timer - scene.state.dt)
 	}
 
+	// fmt.println("PLAYER: ", scene.player)
+
 	#partial switch entity.type {
+	case .Melee:
+		{
+			entity.wander_timer -= scene.state.dt
+			if entity.wander_timer <= 0 {
+				scene_despawn_entity(scene, entity)
+			}
+		}
 	case .Player:
 		move := vec2f {
 			f32(
@@ -668,12 +994,14 @@ entity_update :: proc(entity: ^Entity, scene: ^Scene) {
 		move = linalg.vector_normalize0(move) * entity.speed * scene.state.dt
 		entity_actor_move(entity, scene, move)
 
-		// TODO(calco): DEBUG TAKE THIS OUT
 		if scene.state.mouse.buttons[1] == .Pressed {
-			generate_map(&scene.tilemap)
+			if (entity.caster_timer == 0) {
+				mouse_pos := scene_screen_to_world_coords(scene, scene.state.mouse.pos)
+				diff := linalg.normalize0(mouse_pos - entity.position)
+				entity_caster_shoot(entity, diff, scene)
+			}
 		}
-	case .Zombie:
-	case .Skeleton:
+	case .Zombie, .Skeleton:
 		has_los := tilemap_has_line_of_sight(
 			&scene.tilemap,
 			entity.position,
@@ -695,6 +1023,68 @@ entity_update :: proc(entity: ^Entity, scene: ^Scene) {
 		} else if (!entity.is_wandering) {
 			entity_start_wander(entity, entity.position, true)
 		}
+	case .CryingWizard:
+		// fmt.println("WIZ ON: ", entity.type)
+		entity.cry_wiz_craze_cooldown_timer = max(
+			0,
+			entity.cry_wiz_craze_cooldown_timer - scene.state.dt,
+		)
+		has_los := tilemap_has_line_of_sight(
+			&scene.tilemap,
+			entity.position,
+			scene.player.position,
+		)
+		if entity.cry_wiz_craze_cooldown_timer == 0 {
+			random := rand.create(rand._system_random())
+			if !entity.cry_wiz_is_crazed {
+				entity.caster_timer = 0
+				entity.caster_delay = rand.float32_range(0.1, 0.1)
+				entity.cry_wiz_craze_duration_timer = rand.float32(&random) * 2
+				entity.cry_wiz_is_crazed = true
+				// fmt.println("START CRAZ")
+			}
+
+			entity.cry_wiz_craze_duration_timer = max(
+				0,
+				entity.cry_wiz_craze_duration_timer - scene.state.dt,
+			)
+			if entity.cry_wiz_craze_duration_timer == 0 {
+				entity.cry_wiz_craze_cooldown_timer = clamp(rand.float32(&random), 0.75, 1) * 5
+				entity.cry_wiz_is_crazed = false
+				entity.caster_delay = 2
+				// fmt.println("end CRAZ")
+			}
+			if entity.caster_timer == 0 {
+				entity_caster_shoot(entity, vec2f_random_dir(), scene)
+			}
+			if !entity.is_wandering {
+				entity_start_wander(entity, entity.position, false)
+			}
+		}
+
+		if (has_los) {
+			if (entity.is_wandering) {
+				entity_stop_wander(entity)
+			}
+			dist := linalg.length(scene.player.position - entity.position)
+			dir := linalg.normalize0(scene.player.position - entity.position)
+			if (dist < 64) {
+				dir = -dir
+			}
+
+			random := rand.create(rand._system_random())
+			dir = vec2f_rotate(dir, rand.float32_range(-1, 1) * math.PI * 0.25)
+
+			move := dir * entity.speed * scene.state.dt
+			entity_actor_move(entity, scene, move)
+
+			if (entity.caster_timer == 0) {
+				entity_caster_shoot(entity, dir, scene)
+			}
+		} else if (!entity.is_wandering) {
+			entity_start_wander(entity, entity.position, true)
+		}
+	// case .Allamir:
 	case .Camera:
 		if (entity.scale != prev_cam_zoom) {
 			SDL.RenderSetScale(scene.state.renderer, entity.scale, entity.scale)
@@ -727,6 +1117,10 @@ entity_update :: proc(entity: ^Entity, scene: ^Scene) {
 		)
 	}
 
+	if (entity.components & Components{.Hurtbox} != {}) {
+		entity.hurtbox_reset_timer = max(0, entity.hurtbox_reset_timer - scene.state.dt)
+	}
+
 	if (entity.components & Components{.Caster} != {}) {
 		entity.caster_timer = max(0, entity.caster_timer - scene.state.dt)
 	}
@@ -740,7 +1134,7 @@ entity_update :: proc(entity: ^Entity, scene: ^Scene) {
 	}
 
 	if (entity.components & Components{.Actor} != {}) {
-		kb := entity.knockback * scene.state.dt * 100
+		kb := entity.knockback * scene.state.dt * 10
 		entity_actor_move(entity, scene, kb)
 		entity.knockback -= kb
 	}
@@ -800,6 +1194,9 @@ _tilemap_collision :: proc(scene: ^Scene, entity: ^Entity, resolve_h: bool, offs
 		&scene.tilemap,
 		entity.position + entity.coll_aabb.xy + offset * entity.coll_aabb.zw,
 	)
+	if (!scene.valid) {
+		return
+	}
 	if (scene.tilemap.cells[tilemap_v2_to_idx(&scene.tilemap, p)] == .Wall) {
 		movement := rectf_handle_collisions(
 			entity.position,
@@ -902,11 +1299,16 @@ entity_late_update :: proc(entity: ^Entity, scene: ^Scene) {
 	if entity.type == .Camera {
 		if (scene.player != nil) {
 			entity.position = scene.player.position
+			if (entity != scene.camera) {
+				fmt.println("MISMATCH")
+				scene.camera = entity
+			}
 		}
 	}
 }
 
 entity_render :: proc(entity: ^Entity, scene: ^Scene) {
+	// fmt.println("CAM POS: ", scene.camera.position)
 	if (entity.components & Components{.Sprite} != {}) {
 		entity.ui_rect = draw_sprite(
 			scene.state,
@@ -973,6 +1375,22 @@ Tile_Visibility := [Tile]bool {
 	.None  = true,
 	.Wall  = false,
 	.Floor = true,
+}
+
+tilemap_random_floor :: proc(tilemap: ^Tilemap) -> vec2f {
+	floors := make([dynamic]vec2i)
+	defer delete(floors)
+	for y in 0 ..< tilemap.height {
+		for x in 0 ..< tilemap.width {
+			idx := tilemap_v2_to_idx(tilemap, {x, y})
+			if (tilemap.cells[idx] == .Floor) {
+				append(&floors, vec2i{x, y})
+			}
+		}
+	}
+
+	v := floors[rand._system_random() % u64(len(floors))]
+	return vec2f{f32(v.x) + 0.5, f32(v.y) + 0.5}
 }
 
 tilemap_has_line_of_sight :: proc(tilemap: ^Tilemap, p1: vec2f, p2: vec2f) -> bool {
@@ -1098,6 +1516,11 @@ Scene :: struct {
 	state:           ^State,
 	tilemap:         Tilemap,
 	tilemap_enabled: bool,
+	mob_spawn_timer: f32,
+	mobs_left:       i32,
+	mobs_to_spawn:   i32,
+	stage:           i32,
+	valid:           bool,
 }
 
 scene_screen_to_world_coords :: proc(scene: ^Scene, screen: vec2i) -> vec2f {
@@ -1133,6 +1556,7 @@ scene_add_tilemap :: proc(scene: ^Scene, size: vec2i, tile_size: vec2i, pos: vec
 }
 
 scene_free :: proc(scene: ^Scene) {
+	scene.valid = false
 	tilemap_free(&scene.tilemap)
 	for entity in &scene.entities {
 		entity_free(&entity)
@@ -1146,6 +1570,7 @@ scene_spawn_entity :: proc(scene: ^Scene, entity: Entity) -> ^Entity {
 	append(&scene.entities, entity)
 
 	if (entity.type == .Player) {
+		fmt.println("SETTING PLAYER")
 		scene.player = &scene.entities[entity.id]
 	}
 
@@ -1163,14 +1588,42 @@ scene_despawn_entity :: proc(scene: ^Scene, entity: ^Entity) {
 	if idx == -1 {
 		return
 	}
-
 	entity_free(entity)
 	unordered_remove(&scene.entities, idx)
 }
 
 scene_update :: proc(scene: ^Scene) {
+	scene.mob_spawn_timer -= scene.state.dt
+	if (scene.mob_spawn_timer <= 0 && scene.mobs_to_spawn > 0) {
+		scene.mobs_to_spawn -= 1
+		scene.mob_spawn_timer = 2 + f32(rand._system_random() % 5)
+		mob: Entity
+		pos := tilemap_random_floor(&scene.tilemap)
+		switch rand._system_random() % 100 {
+		case 0 ..< 25:
+			mob = entity_make_zombie(pos)
+		case 25 ..< 75:
+			mob = entity_make_skeleton(pos)
+		case 75 ..< 90:
+			mob = entity_make_crying_wizard(pos)
+		case 90 ..< 100:
+			mob = entity_make_allamir(pos)
+		}
+		scene_spawn_entity(scene, mob)
+	}
+
+	if (scene.stage >= 0 && scene.mobs_left == 0) {
+		state_switch_scene(scene.state, state_make_gameplay_scene(scene.state, scene.stage + 1))
+		return
+	}
+
 	for entity in &scene.entities {
+		// fmt.println("ENTITY: ", &entity)
 		entity_update(&entity, scene)
+		if (scene.player != nil && entity.type == .Player) {
+			scene.player = &entity
+			// fmt.println("SCENE: ", scene.player, "\n | REAL: ", entity, "\n\n\n")
+		}
 	}
 }
 
@@ -1247,6 +1700,8 @@ State :: struct {
 state_make_menu_scene :: proc(state: ^State) -> Scene {
 	scene := scene_empty(state)
 	scene.camera.scale = 4
+	scene.valid = true
+	scene.stage = -1
 	scene_spawn_entity(&scene, entity_make_text({0, 0}, "Rogueday", 1, true, false))
 	scene_spawn_entity(
 		&scene,
@@ -1258,7 +1713,7 @@ state_make_menu_scene :: proc(state: ^State) -> Scene {
 			{20, 20},
 			false,
 			proc(scene: ^Scene, btn: ^Entity) {
-				state_switch_scene(scene.state, state_make_gameplay_scene(scene.state))
+				state_switch_scene(scene.state, state_make_gameplay_scene(scene.state, 1))
 			},
 		),
 	)
@@ -1345,14 +1800,20 @@ generate_map :: proc(tilemap: ^Tilemap) {
 	}
 }
 
-state_make_gameplay_scene :: proc(state: ^State) -> Scene {
+state_make_gameplay_scene :: proc(state: ^State, stage: i32) -> Scene {
 	scene := scene_empty(state)
-	scene.camera.scale = 2
-	// scene_spawn_entity(&scene, entity_make_text({0, 0}, "GAMEPLAY OVER HERE", 10, true, false))
-	scene_spawn_entity(&scene, entity_make_player({0, 0}))
+	scene.camera.scale = 1
+	scene.valid = true
+	str := "Stage (idk how to get a number here)"
 
-	// scene_spawn_entity(&scene, entity_make_zombie({64, 64}))
-	scene_spawn_entity(&scene, entity_make_skeleton({-64, 64}))
+	scene.mobs_to_spawn = stage * 5
+	scene.mob_spawn_timer = max(1 / f32(stage), f32(1))
+	scene.mobs_left = scene.mobs_to_spawn
+	scene.mob_spawn_timer = 0
+	scene.stage = stage
+
+	scene_spawn_entity(&scene, entity_make_text({0, 0}, str, 2, true, false))
+	scene_spawn_entity(&scene, entity_make_player({0, 0}))
 
 	tilemap := scene_add_tilemap(&scene, {100, 100}, {16, 16}, {-50 * 16, -50 * 16})
 	generate_map(tilemap)
@@ -1362,7 +1823,23 @@ state_make_gameplay_scene :: proc(state: ^State) -> Scene {
 
 state_make_gameover_scene :: proc(state: ^State) -> Scene {
 	scene := scene_empty(state)
+	scene.stage = -1
+	scene.valid = true
 	scene_spawn_entity(&scene, entity_make_text({0, 0}, "GAME OVER", 1, true, true))
+	scene_spawn_entity(
+		&scene,
+		entity_make_button(
+			{0, 200},
+			"Play Again",
+			1,
+			true,
+			{20, 20},
+			true,
+			proc(scene: ^Scene, btn: ^Entity) {
+				state_switch_scene(scene.state, state_make_gameplay_scene(scene.state, 1))
+			},
+		),
+	)
 	return scene
 }
 
